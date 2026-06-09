@@ -1,5 +1,7 @@
 // EBP Spin Coating Numerical Solver
-// dh/dt = -(rho*omega^2)/(3*eta(t)) * (1/r) * d(r*h^3)/dr - E
+// Governing eq: dh/dt = -(rho*omega^2)/(3*eta(t)) * (1/r) * d(r^2*h^3)/dr - E
+// Ref: Emslie, Bonner, Peck (1958) J.Appl.Phys 29(5)
+// RK2 time integration, finite-volume spatial discretization
 
 const RHO = 1100;
 const ETA_GEL_FACTOR = 50;
@@ -12,7 +14,7 @@ export function runSimulation({ omega_rpm, eta0_cP, h0_um, E_um_s, beta, R_mm, N
   const R     = R_mm * 1e-3;
   const eta_gel = eta0 * ETA_GEL_FACTOR;
 
-  // cell-centered grid, avoids r=0 singularity
+  // cell-centered grid avoiding r=0 singularity
   const dr = R / N;
   const r  = Array.from({ length: N }, (_, i) => (i + 0.5) * dr);
 
@@ -24,43 +26,44 @@ export function runSimulation({ omega_rpm, eta0_cP, h0_um, E_um_s, beta, R_mm, N
 
   const getEta = (time) => eta0 * Math.exp(beta * E * time);
 
-  // RHS using finite-volume: (1/r)*d(r*h^3)/dr
-  // flux at cell face i+1/2: F = r_{i+1/2} * h_{i+1/2}^3
+  // RHS: -(rho*omega^2/3eta) * (1/r) * d(r^2*h^3)/dr - E
+  // flux F = r^2 * h^3 evaluated at cell faces
+  // uniform film: d(r^2*h^3)/dr = 2r*h^3 -> (1/r)*2r*h^3 = 2h^3 ✓ (Emslie)
   const computeRHS = (h_arr, time) => {
     const eta = getEta(time);
     const C = (RHO * omega * omega) / (3.0 * eta);
     const rhs = new Array(N).fill(0);
 
     for (let i = 0; i < N; i++) {
-      // right face flux
+      // right face flux F_{i+1/2} = r_{i+1/2}^2 * h_{i+1/2}^3
       let Fp;
       if (i < N - 1) {
         const rp = r[i] + 0.5 * dr;
         const hp = 0.5 * (h_arr[i] + h_arr[i + 1]);
-        Fp = rp * hp * hp * hp;
+        Fp = rp * rp * hp * hp * hp;
       } else {
-        // outflow BC: same as interior
+        // free outflow BC at r=R
         const rp = r[i] + 0.5 * dr;
-        Fp = rp * h_arr[i] * h_arr[i] * h_arr[i];
+        Fp = rp * rp * h_arr[i] * h_arr[i] * h_arr[i];
       }
 
-      // left face flux
+      // left face flux F_{i-1/2} = r_{i-1/2}^2 * h_{i-1/2}^3
       let Fm;
       if (i > 0) {
         const rm = r[i] - 0.5 * dr;
         const hm = 0.5 * (h_arr[i - 1] + h_arr[i]);
-        Fm = rm * hm * hm * hm;
+        Fm = rm * rm * hm * hm * hm;
       } else {
         // symmetry BC: zero flux at r=0
         Fm = 0;
       }
 
-      // (1/r) * (Fp - Fm) / dr
       rhs[i] = -C * (Fp - Fm) / (r[i] * dr) - E;
     }
     return rhs;
   };
 
+  // Emslie analytical solution (E=0, uniform film)
   const emslieH = (time) => {
     const alpha = (4.0 * RHO * omega * omega * h0 * h0) / (3.0 * eta0);
     return h0 / Math.sqrt(1.0 + alpha * time);
@@ -74,14 +77,10 @@ export function runSimulation({ omega_rpm, eta0_cP, h0_um, E_um_s, beta, R_mm, N
     const h_max = Math.max(...h);
     if (h_max <= 0) break;
 
-    // adaptive dt from CFL
     const D = (RHO * omega * omega * h_max * h_max) / (3.0 * eta_t);
-    let dt;
-    if (D > 0) {
-      dt = Math.min(0.3 * dr * dr / (2.0 * D), 0.05, t_final - t);
-    } else {
-      dt = Math.min(0.05, t_final - t);
-    }
+    const dt = D > 0
+      ? Math.min(0.3 * dr * dr / (2.0 * D), 0.05, t_final - t)
+      : Math.min(0.05, t_final - t);
     if (dt <= 1e-10) break;
 
     // RK2
@@ -100,7 +99,7 @@ export function runSimulation({ omega_rpm, eta0_cP, h0_um, E_um_s, beta, R_mm, N
       last_snap = snap_idx;
       const h_um = h.map(v => v * 1e6);
       const mean_h = h_um.reduce((a, b) => a + b, 0) / N;
-      const std_h = Math.sqrt(h_um.reduce((a, b) => a + (b - mean_h) ** 2, 0) / N);
+      const std_h  = Math.sqrt(h_um.reduce((a, b) => a + (b - mean_h) ** 2, 0) / N);
       snapshots.push({
         t: parseFloat(t.toFixed(2)),
         h: h_um.map(v => parseFloat(v.toFixed(4))),
@@ -114,17 +113,21 @@ export function runSimulation({ omega_rpm, eta0_cP, h0_um, E_um_s, beta, R_mm, N
   const h_final_um = h.map(v => v * 1e6);
   const mean_f = h_final_um.reduce((a, b) => a + b, 0) / N;
   const std_f  = Math.sqrt(h_final_um.reduce((a, b) => a + (b - mean_f) ** 2, 0) / N);
+  const sigma_f = mean_f > 1e-6 ? (std_f / mean_f) * 100 : 0;
 
   const validation = Array.from({ length: 50 }, (_, i) => {
     const tv = (i / 49) * t_final;
-    return { t: parseFloat(tv.toFixed(2)), h_emslie: parseFloat((emslieH(tv) * 1e6).toFixed(4)) };
+    return {
+      t: parseFloat(tv.toFixed(2)),
+      h_emslie: parseFloat((emslieH(tv) * 1e6).toFixed(4))
+    };
   });
 
   return {
     snapshots,
     r_mm: r.map(v => parseFloat((v * 1e3).toFixed(2))),
     h_final: h_final_um.map(v => parseFloat(v.toFixed(4))),
-    uniformity_final: parseFloat((mean_f > 1e-6 ? (std_f / mean_f) * 100 : 0).toFixed(3)),
+    uniformity_final: parseFloat(sigma_f.toFixed(3)),
     mean_final: parseFloat(mean_f.toFixed(4)),
     t_gel: t_gel ? parseFloat(t_gel.toFixed(2)) : null,
     validation,
