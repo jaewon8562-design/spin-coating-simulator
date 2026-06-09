@@ -51,7 +51,7 @@ export default function App() {
   const [tab, setTab] = useState("interactive");
   const [params, setParams] = useState({
     omega_rpm: 3000, eta0_cP: 250, h0_um: 5,
-    E_um_s: 0.2, beta: 3, R_mm: 75,
+    E_um_s: 0.05, beta: 3, R_mm: 75,
   });
   const [result, setResult] = useState(null);
   const [frameIdx, setFrameIdx] = useState(0);
